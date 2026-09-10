@@ -15,6 +15,7 @@
 | BUG-005 | Medium | IpV4Rotator / CIDR /31 | OPEN |
 | BUG-006 | Medium | Repository structure / build integrity | OPEN |
 | BUG-007 | High | SmtpTestRunner / retry pacing | OPEN |
+| BUG-008 | High | SmtpTestRunner / direct MX multi-domain routing | OPEN |
 
 ---
 
@@ -208,6 +209,40 @@ After the retry-specific backoff, re-enter the shared pacing controller before t
 ### Regression test
 
 Use multiple concurrent workers with a small `IntervalMs`, force transient SMTP failures, and record attempt timestamps. Verify that retry attempts also obey the configured global spacing within the allowed timing tolerance.
+
+---
+
+## BUG-008 — Direct MX mode resolves MX only for the first recipient domain
+
+**Severity:** High  
+**File:** `SmtpTestRunner.cs`  
+**Status:** OPEN
+
+### Evidence
+
+When `DirectMxDelivery` is enabled, the runner performs exactly one MX lookup using:
+
+`options.Recipients[0].Split('@').Last()`
+
+It then replaces `options.SmtpHost` with that single MX host before the message workers start. The message loop can subsequently select different recipients using:
+
+`options.Recipients[(i - 1) % options.Recipients.Count]`
+
+Therefore, if the recipient list contains multiple domains, every message is sent to the MX host resolved for the first recipient's domain, including messages addressed to other domains.
+
+### Impact
+
+- Multi-domain direct-MX tests can route SMTP traffic to the wrong destination MX.
+- Results can be misleading or fail for reasons unrelated to the recipient's actual mail infrastructure.
+- The defect is silent: the UI can show a successful single MX resolution while later messages target different recipient domains.
+
+### Required fix
+
+Resolve MX per recipient domain (with caching/deduplication), and select the SMTP host based on the actual recipient domain for each message. If the feature contract intentionally supports only one recipient domain, validate and reject mixed-domain recipient lists before sending.
+
+### Regression test
+
+Use at least two recipient domains with distinct MX targets. Verify that each message is connected to the MX host belonging to its own recipient domain, or that mixed-domain input is rejected explicitly.
 
 ---
 
