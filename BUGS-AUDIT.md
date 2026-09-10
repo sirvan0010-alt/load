@@ -14,6 +14,7 @@
 | BUG-004 | Medium | ProxyRotator / random selection | OPEN |
 | BUG-005 | Medium | IpV4Rotator / CIDR /31 | OPEN |
 | BUG-006 | Medium | Repository structure / build integrity | OPEN |
+| BUG-007 | High | SmtpTestRunner / retry pacing | OPEN |
 
 ---
 
@@ -175,6 +176,38 @@ Reconstruct the repository from the canonical source tree, remove committed Git-
 ### Verification
 
 `dotnet restore`, `dotnet build -c Release`, and `dotnet test -c Release` from a clean clone must succeed.
+
+---
+
+## BUG-007 — Retry path bypasses the global pacing controller
+
+**Severity:** High  
+**File:** `SmtpTestRunner.cs` / `SmartPaceController.cs`  
+**Status:** OPEN
+
+### Evidence
+
+The normal send path calls `SmartPaceController.WaitBeforeSendAsync(...)`, which reserves the shared global pacing slot. The transient-error retry path, however, currently does only:
+
+`await Task.Delay(GetRetryDelay(attempt), ct).ConfigureAwait(false);`
+
+and then immediately starts the next attempt. There is no call back into the global pacing schedule after the retry backoff.
+
+`SmartPaceController` explicitly documents `IntervalMs` as **global spacing for all workers**, so a retry is an SMTP send attempt and must participate in that same global spacing policy.
+
+### Impact
+
+A transient failure can cause a retry to be emitted immediately after its local exponential/backoff delay, independently of the global `IntervalMs`. With multiple workers/retries this can create bursts that violate the configured global pacing even though the normal first-attempt path is correctly throttled.
+
+This also makes the effective send rate depend on the error pattern: under failures, the tester can become significantly more aggressive than the configured pacing suggests.
+
+### Required fix
+
+After the retry-specific backoff, re-enter the shared pacing controller before the retry attempt. The retry should participate in global pacing without reserving the same recipient twice. A dedicated method such as `WaitBeforeRetryAsync(CancellationToken)` is preferable so retry pacing does not corrupt per-recipient reservation state.
+
+### Regression test
+
+Use multiple concurrent workers with a small `IntervalMs`, force transient SMTP failures, and record attempt timestamps. Verify that retry attempts also obey the configured global spacing within the allowed timing tolerance.
 
 ---
 
